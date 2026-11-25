@@ -1,272 +1,166 @@
-# looking at growth as the response variable
+################################################################################
+# Growth (body weight) of Folsomia candida: full factorial design
+#
+# - Response: log-transformed body weight, linear models (lm). A Gamma GLM
+#   with log link gave similar diagnostics; lm on log(weight) was chosen as
+#   the simpler model.
+# - Analyses run separately for the cold (4.5-20.1 °C) and warm
+#   (20.1-27.7 °C) gradients.
+# - Model selection: from the full factorial model, interaction terms are
+#   removed sequentially (least significant first) using single-term deletion
+#   F-tests (drop1), until all remaining highest-order terms have P < 0.05.
+#   Main effects are always retained.
+# - Tests: Type III F-tests (car::Anova) with sum-to-zero contrasts.
+# - EMMs: averaged over the other factors on the log scale and
+#   back-transformed to mg (geometric means); contrasts are reported as
+#   ratios (fold changes).
+################################################################################
 
-# Load library
-library(tidyverse) # v. 2.0.0
-library(patchwork)
+library(tidyverse)  # v. 2.0.0
+library(car)
+library(effectsize)
 library(emmeans)
+library(patchwork)
 
+# Sum-to-zero contrasts: must be set BEFORE any model is fitted
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# Input origin data
-dat.org <- read_csv('data/sugrwe.csv') %>% as_tibble() %>% mutate(., vict = number-survivor)
+# ---- data ---------------------------------------------------------------------
 
-# check what the data looks like
+cu.list  <- c(17, 436, 1629)
+swp.list <- c(3, 5, 10, 40, 63, 100)
 
-summary(dat.org$growth)
+dat.org <- read_csv("data/sugrwe.csv") %>%
+  as_tibble() %>%
+  mutate(
+    lgswp = swp.list[match(lgswp, sort(unique(lgswp)))],  # log10(kPa) -> kPa
+    sqrcu = cu.list[match(sqrcu, sort(unique(sqrcu)))]    # sqrt(mg/kg) -> mg/kg
+  ) %>%
+  filter(!is.na(growth))   # replicates without surviving animals have no weight
 
-# problem with right skewness?
+# check the recoding: 6 SWP levels and 3 Cu levels
+count(dat.org, lgswp)
+count(dat.org, sqrcu)
 
-sum(dat.org$growth == 0, na.rm = TRUE)
-
-mean(dat.org$growth == 0, na.rm = TRUE) * 100
-
-hist(dat.org$growth,
-     breaks = 30,
-     main = "Body weight distribution",
-     xlab = "Body weight (mg)")
-
-boxplot(dat.org$growth,
-        ylab = "Body weight (mg)")
-
-dat.org %>%
-  summarise(
-    n = n(),
-    zeros = sum(growth == 0, na.rm = TRUE),
-    pct_zeros = 100 * mean(growth == 0, na.rm = TRUE),
-    min = min(growth, na.rm = TRUE),
-    q1 = quantile(growth, 0.25, na.rm = TRUE),
-    median = median(growth, na.rm = TRUE),
-    mean = mean(growth, na.rm = TRUE),
-    q3 = quantile(growth, 0.75, na.rm = TRUE),
-    max = max(growth, na.rm = TRUE)
-  )
-
-# does log() help
-
-hist(log(dat.org$growth))
-qqnorm(log(dat.org$growth))
-qqline(log(dat.org$growth))
-
-mod.growth <- lm(
-  log(growth) ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  data = dat.org
-)
-
-par(mfrow = c(2,2))
-plot(mod.growth)
-
-mod.growth.glm <- glm(
-  growth ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  family = Gamma(link = "log"),
-  data = dat.org
-)
-
-
-par(mfrow = c(2,2))
-plot(mod.growth.glm)
-
-###################### separate in cold and warm ##############################
+# log() requires positive values
+stopifnot(all(dat.org$growth > 0))
 
 dat.cold <- dat.org %>%
   filter(temp %in% c(20.1, 9.7, 4.5))
 
-
 dat.warm <- dat.org %>%
   filter(temp %in% c(20.1, 24.1, 27.7))
 
-#dat.warm <- dat.warm[-c(161, 169, 237), ]
+# ---- distribution of the raw data -------------------------------------------------
 
-# cold
+summary(dat.org$growth)
 
-mod.growth.cold <- lm(
+par(mfrow = c(1, 2))
+hist(dat.org$growth, breaks = 30, main = "Body weight", xlab = "Body weight")
+hist(log(dat.org$growth), breaks = 30, main = "log(body weight)",
+     xlab = "log(body weight)")
+
+# ---- helper functions ---------------------------------------------------------
+
+# Sequential backward simplification of interaction terms.
+# test = "F" for lm and quasibinomial glm; test = "Chisq" for glm.nb
+simplify_interactions <- function(model, alpha = 0.05, test = "F") {
+  repeat {
+    d <- drop1(model, test = test)
+    d <- d[grepl(":", rownames(d)), , drop = FALSE]   # interaction terms only
+    if (nrow(d) == 0) break
+    p <- d[[grep("^Pr", names(d))]]
+    if (all(p < alpha, na.rm = TRUE)) break
+    worst <- rownames(d)[which.max(p)]
+    message("Removing ", worst, " (P = ", signif(max(p), 3), ")")
+    model <- update(model, as.formula(paste(". ~ . -", worst)))
+  }
+  model
+}
+
+# Prints the tests for Table S4 (three-way), Table S3 (structure) and the
+# Type III table with partial eta^2 for the final model (Table S8).
+report_models <- function(full, final, label) {
+  cat("\n\n====================", label, "====================\n")
+  
+  cat("\n-- Three-way interaction in the full model (Table S4) --\n")
+  a.full <- car::Anova(full, type = 3)
+  print(a.full)
+  print(effectsize::eta_squared(a.full, partial = TRUE, ci = NULL))
+  
+  cat("\n-- Final model structure (Table S3) --\n")
+  print(formula(final))
+  
+  cat("\n-- Type III tests, final model --\n")
+  a.final <- car::Anova(final, type = 3)
+  print(a.final)
+  print(effectsize::eta_squared(a.final, partial = TRUE, ci = NULL))
+  
+  par(mfrow = c(2, 2))
+  plot(final, main = label)   # diagnostics (Figure S6)
+}
+
+################################################################################
+############################ models ############################################
+################################################################################
+
+# ---- cold gradient ----
+
+growth.cold.full <- lm(
   log(growth) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
   data = dat.cold
 )
+growth.cold.final <- simplify_interactions(growth.cold.full)
+report_models(growth.cold.full, growth.cold.final, "Growth - cold gradient")
 
-par(mfrow = c(2,2))
-plot(mod.growth.cold)
+# ---- warm gradient ----
 
-# there's an issue with some outliers, but the conclusion of the analysis does
-# not change when removing the outliers so they are kept
-
-mod.growth.glm.cold <- glm(
-  growth ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  family = Gamma(link = "log"),
-  data = dat.cold
-)
-
-summary(mod.growth.glm.cold)
-
-par(mfrow = c(2,2))
-plot(mod.growth.glm.cold)
-
-hist(dat.cold$growth,
-     breaks = 30,
-     main = "Body weight distribution",
-     xlab = "Body weight (mg)")
-
-hist(sqrt(dat.cold$growth),
-     breaks = 30,
-     main = "Body weight distribution",
-     xlab = "Body weight (mg)")
-
-# square root of the response variable does not help
-
-# warm
-
-mod.growth.warm <- lm(
+growth.warm.full <- lm(
   log(growth) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
   data = dat.warm
 )
+growth.warm.final <- simplify_interactions(growth.warm.full)
+report_models(growth.warm.full, growth.warm.final, "Growth - warm gradient")
 
-par(mfrow = c(2,2))
-plot(mod.growth.warm)
+################################################################################
+############ back-transformed EMMs (geometric means) ###########################
+################################################################################
 
-mod.growth.glm.warm <- glm(
-  growth ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  family = Gamma(link = "log"),
-  data = dat.warm
-)
-summary(mod.growth.glm.warm)
+# emmeans recognises the log() in the model formula, so type = "response"
+# back-transforms means and CIs with exp().
+get_emm_growth <- function(model, term, gradient) {
+  emmeans(model, as.formula(paste("~", term)), type = "response") %>%
+    as.data.frame() %>%
+    rename(emmean = response) %>%
+    mutate(Gradient = gradient)
+}
 
-par(mfrow = c(2,2))
-plot(mod.growth.glm.warm)
+collect_emms_growth <- function(mod.cold, mod.warm) {
+  terms <- c(temp = "temp", lgswp = "lgswp", sqrcu = "sqrcu")
+  lapply(terms, function(tm)
+    rbind(get_emm_growth(mod.cold, tm, "Cold"),
+          get_emm_growth(mod.warm, tm, "Warm")))
+}
 
-hist(dat.warm$growth,
-     breaks = 30,
-     main = "Body weight distribution",
-     xlab = "Body weight (mg)")
+emms.growth <- collect_emms_growth(growth.cold.final, growth.warm.final)
 
-hist(log(dat.warm$growth),
-     breaks = 30,
-     main = "Body weight distribution",
-     xlab = "Body weight (mg)")
+# Values for the Results text (back-transformed means and 95% CIs)
+lapply(emms.growth, function(d)
+  d %>%
+    dplyr::select(Gradient, 1, emmean, lower.CL, upper.CL) %>%
+    mutate(across(c(emmean, lower.CL, upper.CL), ~ signif(.x, 3))))
 
-# as with the cold gradient, there's an issue with some outliers, 
-# but the conclusion of the analysis does not change when removing the 
-# outliers so they are kept
+# Fold changes between temperatures: ratios of back-transformed means
+fold_diff <- function(model, term = "temp") {
+  summary(pairs(emmeans(model, as.formula(paste("~", term))), reverse = TRUE),
+          infer = TRUE, type = "link") %>%
+    as.data.frame() %>%
+    transmute(contrast,
+              fold    = round(exp(estimate), 2),
+              lower   = round(exp(lower.CL), 2),
+              upper   = round(exp(upper.CL), 2),
+              p.value = signif(p.value, 3))
+}
 
-# lm with log transformed growth response variable looks as good as the glm.
-# the choice is then to use lm() because it is a simpler model and the output
-# is easier to understand
-
-mod.growth.cold.full <- lm(
-  log(growth) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  data = dat.cold
-)
-
-summary(mod.growth.cold.full)
-
-drop1(mod.growth.cold.full, test = "F")
-
-library(effectsize)
-
-eta_squared(mod.growth.cold.full, partial = TRUE)
-
-library(car)
-
-anova_growth <- Anova(mod.growth.cold.full, type = 3)
-
-effectsize::eta_squared(
-  anova_growth,
-  partial = TRUE,
-  ci = NULL
-)
-
-mod.growth.cold.twoway <- lm(
-  log(growth) ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  data = dat.cold
-)
-
-summary(mod.growth.cold.twoway)
-
-mod.growth.cold.simple <- lm(
-  log(growth) ~ factor(temp) + factor(lgswp) + factor(sqrcu),
-  data = dat.cold
-)
-
-summary(mod.growth.cold.simple)
-
-anova(mod.growth.cold.twoway, mod.growth.cold.simple)
-
-drop1(mod.growth.cold.twoway, test = "F")
-
-mod.growth.cold.final <- lm(
-  log(growth) ~ factor(temp) +
-    factor(lgswp) +
-    factor(sqrcu) +
-    factor(temp):factor(lgswp) +
-    factor(temp):factor(sqrcu),
-  data = dat.cold
-)
-
-drop1(mod.growth.cold.final, test = "F")
-
-par(mfrow = c(2,2))
-plot(mod.growth.cold.final)
-
-anova(mod.growth.final, mod.growth.cold.full)
-
-drop1(mod.growth.final, test = "F")
-
-# the final model includes temperature interactions with 
-# SWP and Cu contamination.
-
-# warm
-
-mod.growth.warm.full <- lm(
-  log(growth) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  data = dat.warm
-)
-
-summary(mod.growth.warm.full)
-
-drop1(mod.growth.warm.full, test = "F")
-
-library(effectsize)
-
-eta_squared(mod.growth.warm.full, partial = TRUE)
-
-library(car)
-
-anova_growth <- Anova(mod.growth.warm.full, type = 3)
-
-effectsize::eta_squared(
-  anova_growth,
-  partial = TRUE,
-  ci = NULL
-)
-
-mod.growth.warm.twoway <- lm(
-  log(growth) ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  data = dat.warm
-)
-
-
-summary(mod.growth.warm.twoway)
-
-drop1(mod.growth.warm.twoway, test = "F")
-
-mod.growth.warm.simple <- lm(
-  log(growth) ~ factor(temp) + factor(lgswp) + factor(sqrcu),
-  data = dat.warm
-)
-
-summary(mod.growth.warm.simple)
-
-anova(mod.growth.warm.full, mod.growth.warm.twoway, mod.growth.warm.simple)
-
-drop1(mod.growth.warm.twoway, test = "F")
-
-
-par(mfrow = c(2,2))
-plot(mod.growth.warm.twoway)
-
-
-# the model containing all two way interactions is the best: mod.growth.warm.twoway
-
-# see the script: growth_figures for creating figure 4 in the main manuscript
-
-
-##########
-
-
+fold_diff(growth.cold.final)
+fold_diff(growth.warm.final)

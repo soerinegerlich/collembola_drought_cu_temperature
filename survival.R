@@ -1,357 +1,200 @@
+################################################################################
+# Survival of Folsomia candida: full factorial design
+#
+# - Response: number of survivors vs dead per replicate, quasibinomial GLM
+#   with logit link (overdispersion relative to the binomial).
+# - Analyses run separately for the cold (4.5-20.1 °C) and warm
+#   (20.1-27.7 °C) gradients.
+# - Model selection: from the full factorial model, interaction terms are
+#   removed sequentially (least significant first) using single-term deletion
+#   F-tests (drop1), until all remaining highest-order terms have P < 0.05.
+#   Main effects are always retained.
+# - Tests: Type III F-tests (car::Anova) with sum-to-zero contrasts.
+# - EMMs: survival probabilities averaged over the other factors on the logit
+#   scale and back-transformed to the probability scale.
+################################################################################
 
-# modelling survival of springtails in a full factorial design
-
-# Load library
-library(tidyverse) # v. 2.0.0
-library(patchwork)
+library(tidyverse)  # v. 2.0.0
+library(car)
 library(emmeans)
+library(patchwork)
+library(DHARMa)
 
+# Sum-to-zero contrasts: must be set BEFORE any model is fitted
+options(contrasts = c("contr.sum", "contr.poly"))
 
-# Input origin data
-dat.org <- read_csv('data/sugrwe.csv') %>% as_tibble() %>% 
-  mutate(., vict = number-survivor)
+# ---- data ---------------------------------------------------------------------
 
-# Full model on whole dataset #
+cu.list  <- c(17, 436, 1629)
+swp.list <- c(3, 5, 10, 40, 63, 100)
 
-mod.surv <- glm(
-  cbind(survivor, vict) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  family = quasibinomial,
-  data = dat.org
-)
+dat.org <- read_csv("data/sugrwe.csv") %>%
+  as_tibble() %>%
+  mutate(
+    lgswp = swp.list[match(lgswp, sort(unique(lgswp)))],  # log10(kPa) -> kPa
+    sqrcu = cu.list[match(sqrcu, sort(unique(sqrcu)))],   # sqrt(mg/kg) -> mg/kg
+    dead  = number - survivor
+  ) %>%
+  filter(number > 0)     # replicates with no individuals carry no information
 
-summary(mod.surv)
-
-mod.surv1 <- glm(
-  survival ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  family = quasibinomial,
-  data = dat.org
-)
-
-summary(mod.surv1)
-
-# Checking means
-
-emm.temp <- emmeans(mod.surv1, ~ temp, type = "response")
-emm.swp <- emmeans(mod.surv1, ~ lgswp, type = "response")
-emm.cu <- emmeans(mod.surv1, ~ sqrcu, type = "response")
-
-emm.surv <- emmeans(
-  mod.surv1,
-  ~ temp * lgswp,
-  type = "response"
-)
-
-plot(emm.surv)
-
-emmip(
-  mod.surv1,
-  lgswp ~ temp,
-  type = "response"
-)
-
-
-emm.swp <- emmeans(
-  mod.surv1,
-  ~ lgswp | temp,
-  type = "response"
-)
-
-emm.cu <- emmeans(
-  mod.surv1,
-  ~ sqrcu | temp,
-  type = "response"
-)
-
-emmip(mod.surv1,
-      lgswp ~ temp,
-      type = "response")
-
-emmip(mod.surv1,
-      sqrcu ~ temp,
-      type = "response")
-
-# comparing simple models
-
-mod.surv0 <- glm(
-  survival ~ factor(temp) +
-    factor(lgswp) +
-    factor(sqrcu),
-  family = quasibinomial,
-  data = dat.org
-)
-
-mod.surv1 <- glm(
-  survival ~ (factor(temp) +
-                factor(lgswp) +
-                factor(sqrcu))^2,
-  family = quasibinomial,
-  data = dat.org
-)
-
-anova(mod.surv0, mod.surv1, test = "F")
-
-drop1(mod.surv1, test = "F")
-
-emmip(
-  mod.surv1,
-  lgswp ~ temp,
-  type = "response",
-  CIs = TRUE
-) +
-  theme_bw() +
-  labs(
-    x = "Temperature (°C)",
-    y = "Predicted survival (%)",
-    colour = "SWP (kPa)"
-  ) +
-  theme(
-    axis.title = element_text(size = 14),
-    axis.text = element_text(size = 12),
-    legend.title = element_text(size = 13),
-    legend.text = element_text(size = 12)
-  )
-
-surv_swp <- as.data.frame(
-  emmeans(mod.surv1,
-          ~ temp * lgswp,
-          type = "response")
-)
-
-ggplot(
-  surv_swp,
-  aes(
-    x = temp,
-    y = prob,
-    colour = factor(lgswp),
-    group = lgswp
-  )
-) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 3) +
-  geom_errorbar(
-    aes(
-      ymin = asymp.LCL,
-      ymax = asymp.UCL
-    ),
-    width = 0.1
-  ) +
-  theme_bw() +
-  labs(
-    x = "Temperature (°C)",
-    y = "Predicted survival",
-    colour = "SWP (kPa)"
-  )
-
-ggplot(
-  surv_swp,
-  aes(
-    x = temp,
-    y = prob,
-    group = 1
-  )
-) +
-  geom_line() +
-  geom_point(size = 2.5) +
-  geom_errorbar(
-    aes(
-      ymin = asymp.LCL,
-      ymax = asymp.UCL
-    ),
-    width = 0.1
-  ) +
-  facet_wrap(~ lgswp) +
-  theme_bw() +
-  labs(
-    x = "Temperature (°C)",
-    y = "Predicted survival"
-  )
-
-###################### separate in cold and warm ##############################
+# check the recoding: 6 SWP levels and 3 Cu levels
+count(dat.org, lgswp)
+count(dat.org, sqrcu)
 
 dat.cold <- dat.org %>%
   filter(temp %in% c(20.1, 9.7, 4.5))
 
-
 dat.warm <- dat.org %>%
   filter(temp %in% c(20.1, 24.1, 27.7))
 
-# cold
+# ---- overdispersion check (Figure S5) ----------------------------------------------
+# DHARMa does not support quasi-families, so overdispersion is assessed on the
+# binomial version of the full model. Dispersion > 1 justifies quasibinomial.
 
-mod.surv.cold.binom <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
+surv.cold.binom <- glm(
+  cbind(survivor, dead) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
   family = binomial,
   data = dat.cold
 )
-
-summary(mod.surv.cold.binom)
-
-# calculate dispersion
-
-dispersion <- sum(residuals(mod.surv.cold.binom, type = "pearson")^2) /
-  mod.surv.cold.binom$df.residual
-
-dispersion
-
-# dispersion = 1.67 - mild to moderate dispersion so quasibinomial is better
-
-mod.surv.cold <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  family = quasibinomial,
-  data = dat.cold
-)
-
-summary(mod.surv.cold)
-
-drop1(mod.surv.cold, test = "F")
-
-
-# dispersion = 1.67 indicating moderate overdispersion
-# not severe, but better to use quasibinomial error distribution
-
-mod.surv.cold2 <- glm(
-  cbind(survivor, number - survivor) ~ (factor(temp) + factor(lgswp) + factor(sqrcu))^2,
-  family = quasibinomial,
-  data = dat.cold
-)
-
-
-mod.surv.cold.final <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) + factor(lgswp) + factor(sqrcu),
-  family = quasibinomial,
-  data = dat.cold
-)
-
-summary(mod.surv.cold.final)
-drop1(mod.surv.cold.final, test = "F")
-
-mod.surv.cold2 <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) +
-    factor(lgswp) +
-    factor(sqrcu) +
-    factor(temp):factor(lgswp) +
-    factor(temp):factor(sqrcu),
-  family = quasibinomial,
-  data = dat.cold
-)
-
-summary(mod.surv.cold2)
-
-
-drop1(mod.surv.cold2, test = "F")
-drop1(mod.surv.cold1, test = "F")
-
-par(mfrow = c(2, 2))
-plot(mod.surv.cold.final)
-
-# check diagnostics plot
-
-library(DHARMa)
-
-sim <- simulateResiduals(mod.surv.cold.final)
-
-plot(sim)
-
-testDispersion(sim)
-testOutliers(sim)
-testUniformity(sim)
-
-# Overdispersion
-deviance(mod.surv.cold.final) / df.residual(mod.surv.cold.final)
-
-par(mfrow = c(1, 2))
-
-# Influence
-plot(cooks.distance(mod.surv.cold.final))
-
-# Pearson residuals
-plot(
-  fitted(mod.surv.cold.final),
-  residuals(mod.surv.cold.final, type = "pearson")
-)
-abline(h = 0, lty = 2)
-
-anova(mod.surv.cold, mod.surv.cold1, mod.surv.cold.final, mod.surv.cold2, test = "F")
-
-
-########################### Warm ###############################################
-
-mod.surv.warm <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
-  family = quasibinomial,
-  data = dat.warm
-)
-
-summary(mod.surv.warm)
-
-drop1(mod.surv.warm, test = "F")
-
-mod.surv.warm.binom <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
+surv.warm.binom <- glm(
+  cbind(survivor, dead) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
   family = binomial,
   data = dat.warm
 )
 
-dispersion <- sum(residuals(mod.surv.warm.binom, type = "pearson")^2) /
-  mod.surv.warm.binom$df.residual
+pearson_dispersion <- function(model) {
+  sum(residuals(model, type = "pearson")^2) / df.residual(model)
+}
 
-dispersion
+pearson_dispersion(surv.cold.binom)   # dispersion = 1.67
+pearson_dispersion(surv.warm.binom)   # dispersion = 2.18
 
-# dispersion = 2.18 indicating moderate overdispersion
-# best to use quasibinomial error distribution
+sim.cold <- simulateResiduals(surv.cold.binom)
+plot(sim.cold)
+testDispersion(sim.cold)
 
-mod.surv.warm1 <- glm(
-  cbind(survivor, number - survivor) ~ (factor(temp) + 
-                                          factor(lgswp) + 
-                                          factor(sqrcu))^2,
+sim.warm <- simulateResiduals(surv.warm.binom)
+plot(sim.warm)
+testDispersion(sim.warm)
+
+# ---- helper functions ---------------------------------------------------------
+
+# Sequential backward simplification of interaction terms.
+# test = "F" for lm and quasibinomial glm; test = "Chisq" for glm.nb
+simplify_interactions <- function(model, alpha = 0.05, test = "F") {
+  repeat {
+    d <- drop1(model, test = test)
+    d <- d[grepl(":", rownames(d)), , drop = FALSE]   # interaction terms only
+    if (nrow(d) == 0) break
+    p <- d[[grep("^Pr", names(d))]]
+    if (all(p < alpha, na.rm = TRUE)) break
+    worst <- rownames(d)[which.max(p)]
+    message("Removing ", worst, " (P = ", signif(max(p), 3), ")")
+    model <- update(model, as.formula(paste(". ~ . -", worst)))
+  }
+  model
+}
+
+# Prints the tests for Table S4 (three-way), Table S3 (structure) and the
+# Type III table for the final model. Partial eta^2 is not defined for GLMs,
+# so F, df and P are reported.
+report_glm <- function(full, final, label) {
+  cat("\n\n====================", label, "====================\n")
+  
+  cat("\n-- Three-way interaction in the full model (Table S4) --\n")
+  print(car::Anova(full, type = 3, test.statistic = "F", error.estimate = "deviance"))
+  
+  cat("\n-- Final model structure (Table S3) --\n")
+  print(formula(final))
+  
+  cat("\n-- Type III F-tests, final model --\n")
+  print(car::Anova(final, type = 3, test.statistic = "F", error.estimate = "deviance"))
+  
+  cat("\n-- Dispersion parameter, final model --\n")
+  print(summary(final)$dispersion)
+}
+
+################################################################################
+############################ models ############################################
+################################################################################
+
+# ---- cold gradient ----
+
+surv.cold.full <- glm(
+  cbind(survivor, dead) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
   family = quasibinomial,
-  data = dat.warm
+  data = dat.cold
 )
+surv.cold.final <- simplify_interactions(surv.cold.full, test = "F")
+report_glm(surv.cold.full, surv.cold.final, "Survival - cold gradient")
 
-summary(mod.surv.warm1)
-
-mod.surv.warm2 <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) + factor(lgswp) + factor(sqrcu),
-  family = quasibinomial,
-  data = dat.warm
-)
-
-summary(mod.surv.warm2)
-
-anova(mod.surv.warm, mod.surv.warm1, mod.surv.warm2, test = "F")
-
-drop1(mod.surv.warm1, test = "F")
-
-mod.surv.warm.final <- glm(
-  cbind(survivor, number - survivor) ~ factor(temp) +
-    factor(lgswp) +
-    factor(sqrcu) +
-    factor(temp):factor(lgswp) +
-    factor(temp):factor(sqrcu),
-  family = quasibinomial,
-  data = dat.warm
-)
-
-summary(mod.surv.warm.final)
-
-drop1(mod.surv.warm.final, test = "F")
-
-# Overdispersion
-deviance(mod.surv.warm.final) / df.residual(mod.surv.warm.final)
+# diagnostics plot
 
 par(mfrow = c(1, 2))
 
 # Influence
-plot(cooks.distance(mod.surv.warm.final))
+plot(cooks.distance(surv.cold.final))
 
 # Pearson residuals
 plot(
-  fitted(mod.surv.warm.final),
-  residuals(mod.surv.warm.final, type = "pearson")
+  fitted(surv.cold.final),
+  residuals(surv.cold.final, type = "pearson")
 )
 abline(h = 0, lty = 2)
 
-anova(mod.surv.warm, mod.surv.warm1, mod.surv.warm.final, mod.surv.warm2, test = "F")
 
-# The best model is the mod.surv.warm.final containing interactions with temperature
+# ---- warm gradient ----
 
+surv.warm.full <- glm(
+  cbind(survivor, dead) ~ factor(temp) * factor(lgswp) * factor(sqrcu),
+  family = quasibinomial,
+  data = dat.warm
+)
+surv.warm.final <- simplify_interactions(surv.warm.full, test = "F")
+report_glm(surv.warm.full, surv.warm.final, "Survival - warm gradient")
+
+# diagnostics plot
+
+par(mfrow = c(1, 2))
+
+# Influence
+plot(cooks.distance(surv.warm.final))
+
+# Pearson residuals
+plot(
+  fitted(surv.warm.final),
+  residuals(surv.warm.final, type = "pearson")
+)
+abline(h = 0, lty = 2)
+
+
+################################################################################
+############ back-transformed EMMs (survival probabilities) ####################
+################################################################################
+
+# CI column names differ between families (lower.CL / asymp.LCL), so they are
+# standardised here.
+get_emm_surv <- function(model, term, gradient) {
+  emmeans(model, as.formula(paste("~", term)), type = "response") %>%
+    as.data.frame() %>%
+    rename(any_of(c(emmean   = "prob",
+                    lower.CL = "asymp.LCL",
+                    upper.CL = "asymp.UCL"))) %>%
+    mutate(Gradient = gradient)
+}
+
+collect_emms_surv <- function(mod.cold, mod.warm) {
+  terms <- c(temp = "temp", lgswp = "lgswp", sqrcu = "sqrcu")
+  lapply(terms, function(tm)
+    rbind(get_emm_surv(mod.cold, tm, "Cold"),
+          get_emm_surv(mod.warm, tm, "Warm")))
+}
+
+emms.surv <- collect_emms_surv(surv.cold.final, surv.warm.final)
+
+# Values for the Results text (survival probability, 95% CI)
+lapply(emms.surv, function(d)
+  d %>%
+    dplyr::select(Gradient, 1, emmean, lower.CL, upper.CL) %>%
+    mutate(across(c(emmean, lower.CL, upper.CL), ~ round(.x, 3))))
 
